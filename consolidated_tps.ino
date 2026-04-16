@@ -6,7 +6,6 @@
 // ==========================================
 // 1. HARDWARE PINS & MOTOR CONFIGURATION
 // ==========================================
-// Updated to 5, 6, 7 per Electrical Team specs
 constexpr uint8_t STEP_N_PIN = 5;
 constexpr uint8_t DIR_N_PIN  = 6;
 constexpr uint8_t EN_N_PIN   = 7;
@@ -41,22 +40,22 @@ class MovingAverageFilter {
     }
 
     float process(float newValue) {
-        currentSum -= buffer[index];       // Remove oldest value
-        buffer[index] = newValue;          // Add new value
-        currentSum += buffer[index];       // Update sum
-        index = (index + 1) % windowSize;  // Move window index
-        return currentSum / windowSize;    // Return the new average
+        currentSum -= buffer[index];       
+        buffer[index] = newValue;          
+        currentSum += buffer[index];       
+        index = (index + 1) % windowSize;  
+        return currentSum / windowSize;    
     }
 };
 
-MovingAverageFilter weightFilter(5);
+MovingAverageFilter weightFilter(10); 
 MovingAverageFilter gyroFilter(5); 
 
 float filteredAngle = 0.0;
 unsigned long lastTime = 0;
 
 // ==========================================
-// 3. GAIT PHASE STATE MACHINE
+// 3. GAIT PHASE STATE MACHINE & THRESHOLDS
 // ==========================================
 enum GaitPhase {
   INITIAL_CONTACT, 
@@ -71,21 +70,22 @@ enum GaitPhase {
 
 GaitPhase currentPhase = MID_STANCE; 
 
-float baselineWeight = 0.0;
+// Dynamic Variables
 float baselineAngle = 0.0;
-float weightThresholdContact; 
-float weightThresholdLiftoff; 
+float userPaceFactor = 1.0; 
+float peakSwingSpeed = 0.0; 
 
-float maxStanceAngle = -999.0;
-float minStanceAngle = 999.0;
-float maxSwingAngle = -999.0;
-float minSwingAngle = 999.0;
+// Generic Bench-Testing Constants
+// Any object heavier than this noise floor will trigger stance phases
+constexpr float NOISE_FLOOR_UNITS = 15.0; 
+constexpr float MAX_SWING_ANGLE = 65.0;    
+constexpr float BASE_SWING_SPS = 600.0;    
 
 float currentMotorSpeed = 0.0; 
 float currentRequiredTorque = 0.0;
 
 // ==========================================
-// 4. MOTOR CONTROL FUNCTIONS (Brennon's Code)
+// 4. MOTOR CONTROL FUNCTIONS
 // ==========================================
 void stepISR() {
   digitalWriteFast(STEP_N_PIN, DM_ON);
@@ -115,53 +115,50 @@ void setDirection(bool forward) {
 // 5. KNEE ACTUATION LOGIC
 // ==========================================
 void calculateMotorTarget(GaitPhase phase, float &targetSpeedSPS, float &targetTorque) {
-    // Defines "When" and "How Much" power/speed is needed per phase
     switch(phase) {
         case INITIAL_CONTACT:
         case LOADING_RESPONSE:
-            targetTorque = 80.0; // High stiffness
-            targetSpeedSPS = -200.0; // Slight flex (negative) to yield
+            targetTorque = 80.0; 
+            targetSpeedSPS = -100.0 * userPaceFactor; // Yielding slightly
             break;
             
         case MID_STANCE:
             targetTorque = 100.0; // Max support
-            targetSpeedSPS = 0.0; // Lock position
+            targetSpeedSPS = 0.0; // Locked
             break;
             
         case TERMINAL_STANCE:
         case PRE_SWING:
             targetTorque = 90.0; 
-            targetSpeedSPS = 600.0; // Forward driving speed (push-off)
+            targetSpeedSPS = BASE_SWING_SPS * 0.5 * userPaceFactor; // Begin push-off
             break;
             
         case INITIAL_SWING:
         case MID_SWING:
-            targetTorque = 30.0; // Free swing
-            targetSpeedSPS = 800.0; // Fast flexion clearing ground
+            targetTorque = 30.0; // Low resistance
+            targetSpeedSPS = BASE_SWING_SPS * userPaceFactor; // Dynamic swing speed
             break;
             
         case TERMINAL_SWING:
-            targetTorque = 60.0; // Braking torque
-            targetSpeedSPS = -400.0; // Decelerating extension
+            targetTorque = 60.0; // Braking
+            targetSpeedSPS = -300.0 * userPaceFactor; // Decelerate to extend
             break;
     }
 }
 
 void actuateMotor(float speedSPS, float torque) {
-    // 1. Handle Enable/Disable based on required torque
     if (torque > 5.0) {
         enableDriver(true);
     } else {
         enableDriver(false);
     }
 
-    // 2. Handle Direction and Timer Speed
     if (speedSPS > 0) {
-        setDirection(true); // Forward
+        setDirection(true); 
         setSpeedSPS(speedSPS);
     } else if (speedSPS < 0) {
-        setDirection(false); // Reverse
-        setSpeedSPS(abs(speedSPS)); // Timer only takes positive periods
+        setDirection(false); 
+        setSpeedSPS(abs(speedSPS)); 
     } else {
         setSpeedSPS(0);
     }
@@ -171,27 +168,21 @@ void actuateMotor(float speedSPS, float torque) {
 // 6. PHASE DETECTION LOGIC
 // ==========================================
 void detectPhase(float weight, float angle, float velocity) {
-  if (currentPhase >= INITIAL_CONTACT && currentPhase <= TERMINAL_STANCE) {
-      if (angle > maxStanceAngle) maxStanceAngle = angle;
-      if (angle < minStanceAngle) minStanceAngle = angle;
-  } else {
-      if (angle > maxSwingAngle) maxSwingAngle = angle;
-      if (angle < minSwingAngle) minSwingAngle = angle;
-  }
+  // Generic Object Detection based on Noise Floor
+  bool isWeightBearing = weight > NOISE_FLOOR_UNITS;
+  bool isLiftedOff = weight < (NOISE_FLOOR_UNITS * 0.4); // Hysteresis to prevent flickering
 
   switch (currentPhase) {
     case TERMINAL_SWING:
-      if (weight > weightThresholdContact) {
-          currentPhase = INITIAL_CONTACT;
-          maxStanceAngle = angle; minStanceAngle = angle;
-      } break;
+      if (isWeightBearing) currentPhase = INITIAL_CONTACT;
+      break;
 
     case INITIAL_CONTACT:
-      if (abs(angle - baselineAngle) < 10.0) currentPhase = LOADING_RESPONSE;
+      if (abs(angle - baselineAngle) > 2.0) currentPhase = LOADING_RESPONSE;
       break;
 
     case LOADING_RESPONSE:
-      if (abs(angle - baselineAngle) < 3.0) currentPhase = MID_STANCE;
+      if (velocity < 5.0 && isWeightBearing) currentPhase = MID_STANCE;
       break;
 
     case MID_STANCE:
@@ -199,22 +190,27 @@ void detectPhase(float weight, float angle, float velocity) {
       break;
 
     case TERMINAL_STANCE:
-      if (weight < weightThresholdLiftoff && (angle - baselineAngle) < -10.0) {
+      if (isLiftedOff) {
           currentPhase = PRE_SWING;
-          maxSwingAngle = angle; minSwingAngle = angle;
+          peakSwingSpeed = 0.0; // Reset for new swing
       } 
       break;
 
     case PRE_SWING:
-      if (weight < (weightThresholdLiftoff * 0.2)) currentPhase = INITIAL_SWING;
+      if (velocity > 30.0) currentPhase = INITIAL_SWING;
       break;
 
     case INITIAL_SWING:
-      if (velocity > 30.0) currentPhase = MID_SWING;
+      if (velocity > peakSwingSpeed) peakSwingSpeed = velocity;
+      
+      // Adapt user pace multiplier based on max velocity
+      userPaceFactor = constrain(peakSwingSpeed / 100.0, 0.5, 1.5);
+      
+      if ((angle - baselineAngle) > (MAX_SWING_ANGLE * 0.8)) currentPhase = MID_SWING;
       break;
 
     case MID_SWING:
-      if ((angle - baselineAngle) > 10.0 && velocity < 15.0) currentPhase = TERMINAL_SWING; 
+      if (velocity < 10.0) currentPhase = TERMINAL_SWING; 
       break;
   }
 }
@@ -223,36 +219,37 @@ void detectPhase(float weight, float angle, float velocity) {
 // 7. SENSOR CALIBRATION
 // ==========================================
 void calibrateSensors() {
-  Serial.println("--- STARTING CALIBRATION ---");
-  Serial.println("Please stand still with full weight on the prosthetic...");
+  Serial.println("--- CALIBRATING ---");
+  Serial.println("DO NOT TOUCH SENSORS. KEEP PLATE EMPTY. KEEP IMU STILL.");
   delay(2000); 
 
-  float tempWeight = 0;
   float tempAngle = 0;
   int samples = 50;
+
+  // Initialize HX711 with your requested settings
+  pressure_sensor.begin(DATA_PIN, CLOCK_PIN);
+  
+  // pressure_sensor.set_offset(8235729); // Commented out: tare() overrides this!
+  pressure_sensor.set_scale(8.23);
+  
+  // Tare zeros out the weight of the empty plate
+  pressure_sensor.tare(); 
+  delay(500);
 
   for (int i = 0; i < samples; i++) {
     if (myICM.dataReady()) {
       myICM.getAGMT();
       float rawPitch = atan2(myICM.accX(), myICM.accZ()) * 57.2958;
       tempAngle += rawPitch; 
-      
-      float rawWeight = pressure_sensor.get_units(1);
-      tempWeight = weightFilter.process(rawWeight); 
       delay(20);
     }
   }
 
   baselineAngle = tempAngle / samples;
-  baselineWeight = tempWeight;
   filteredAngle = baselineAngle; 
   
-  weightThresholdContact = baselineWeight * 0.15; 
-  weightThresholdLiftoff = baselineWeight * 0.40; 
-
   Serial.println("--- CALIBRATION COMPLETE ---");
   Serial.print("Baseline Angle: "); Serial.println(baselineAngle);
-  Serial.print("Baseline Weight: "); Serial.println(baselineWeight);
   
   lastTime = millis(); 
   delay(1000);
@@ -264,7 +261,6 @@ void calibrateSensors() {
 void setup() {
   Serial.begin(115200);
 
-  // Motor Pin Setup
   pinMode(STEP_N_PIN, OUTPUT);
   pinMode(DIR_N_PIN, OUTPUT);
   pinMode(EN_N_PIN, OUTPUT);
@@ -273,16 +269,8 @@ void setup() {
   digitalWriteFast(DIR_N_PIN, DM_OFF);
   digitalWriteFast(EN_N_PIN, DM_OFF);
   
-  // Default driver to ON for holding torque
   enableDriver(true);
-
-  // Pressure Sensor Setup
-  pressure_sensor.begin(DATA_PIN, CLOCK_PIN);
-  pressure_sensor.set_offset(8235729);
-  pressure_sensor.set_scale(8.23);
-  pressure_sensor.tare(); 
   
-  // IMU Setup
   WIRE_PORT.begin();
   WIRE_PORT.setClock(400000);
 
@@ -306,36 +294,28 @@ void loop() {
   if (myICM.dataReady() && pressure_sensor.is_ready()) {
     myICM.getAGMT(); 
     
-    // Time tracking for Gyro
     unsigned long currentTime = millis();
     float dt = (currentTime - lastTime) / 1000.0; 
     lastTime = currentTime;
 
-    // 1. Complementary Filter (Angle Fusion)
     float accPitch = atan2(myICM.accX(), myICM.accZ()) * 57.2958;
     float currentGyroY = gyroFilter.process(myICM.gyrY()); 
     filteredAngle = 0.96 * (filteredAngle + currentGyroY * dt) + 0.04 * accPitch;
     
-    // 2. Load Cell Filtering
     float rawWeight = pressure_sensor.get_units(1);
     float smoothWeight = weightFilter.process(rawWeight);
 
-    // 3. Phase Detection & State Machine
     detectPhase(smoothWeight, filteredAngle, currentGyroY);
-
-    // 4. Calculate Motor Target based on Phase
     calculateMotorTarget(currentPhase, currentMotorSpeed, currentRequiredTorque);
-    
-    // 5. Actuate the Stepper (Timer handles pulses in the background)
     actuateMotor(currentMotorSpeed, currentRequiredTorque);
 
-    // 6. Telemetry for Serial Plotter
-    Serial.print("Phase:"); Serial.print(currentPhase * 10); 
+    // Telemetry
+    Serial.print("Weight:"); Serial.print(smoothWeight);
+    Serial.print(", Phase:"); Serial.print(currentPhase * 10); 
     Serial.print(", Angle:"); Serial.print(filteredAngle);
     Serial.print(", MotorSPS:"); Serial.println(currentMotorSpeed);
     
   } else {
-    // Do not block heavily here so loop stays responsive
     delay(2); 
   }
 }
