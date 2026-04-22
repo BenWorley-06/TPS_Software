@@ -230,7 +230,7 @@ void calibrateSensors() {
   pressure_sensor.begin(DATA_PIN, CLOCK_PIN);
   
   // pressure_sensor.set_offset(8235729); // Commented out: tare() overrides this!
-  pressure_sensor.set_scale(8.23);
+  pressure_sensor.set_scale(-12.48);
   
   // Tare zeros out the weight of the empty plate
   pressure_sensor.tare(); 
