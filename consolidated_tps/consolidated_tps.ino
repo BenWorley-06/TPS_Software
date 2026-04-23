@@ -259,7 +259,7 @@ void calibrateSensors() {
 // 8. SYSTEM SETUP
 // ==========================================
 void setup_sensors() {
-  Serial.begin(115200);
+
 
   pinMode(STEP_N_PIN, OUTPUT);
   pinMode(DIR_N_PIN, OUTPUT);
