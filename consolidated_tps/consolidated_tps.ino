@@ -258,7 +258,7 @@ void calibrateSensors() {
 // ==========================================
 // 8. SYSTEM SETUP
 // ==========================================
-void setup() {
+void setup_sensors() {
   Serial.begin(115200);
 
   pinMode(STEP_N_PIN, OUTPUT);
@@ -290,7 +290,7 @@ void setup() {
 // ==========================================
 // 9. MAIN LOOP
 // ==========================================
-void loop() {
+String read_sensors() {
   if (myICM.dataReady() && pressure_sensor.is_ready()) {
     myICM.getAGMT(); 
     
@@ -309,13 +309,10 @@ void loop() {
     calculateMotorTarget(currentPhase, currentMotorSpeed, currentRequiredTorque);
     actuateMotor(currentMotorSpeed, currentRequiredTorque);
 
-    // Telemetry
-    Serial.print("Weight:"); Serial.print(smoothWeight);
-    Serial.print(", Phase:"); Serial.print(currentPhase * 10); 
-    Serial.print(", Angle:"); Serial.print(filteredAngle);
-    Serial.print(", MotorSPS:"); Serial.println(currentMotorSpeed);
+    return String(smoothWeight)+","+String(currentPhase * 10)+","+String(filteredAngle)+","+String(currentMotorSpeed);
     
   } else {
     delay(2); 
+    return null;
   }
 }
